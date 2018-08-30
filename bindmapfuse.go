@@ -253,7 +253,6 @@ func (n *Node) RealPath() (realPath string) {
 
 func (n *Node) LookupPath(path string) *Node {
 	if path == "/" && n.IsRoot() {
-		log.Printf("LookupPath: returning root node")
 		return n
 	}
 	childName, relPath := n.splitPathFirstRest(path)
@@ -264,7 +263,6 @@ func (n *Node) LookupPath(path string) *Node {
 			return n.GetMount(childName).LookupPath(relPath)
 		}
 	} else {
-		log.Printf("LookupPath: node=%+v has no child named '%s' for path='%s'", n, childName, path)
 		return nil
 	}
 }
@@ -293,18 +291,19 @@ func (n *Node) ResolvePath(path string) (realPath string) {
 
 type Bmfs struct {
 	fuse.FileSystemBase
+	config *BindMapConfig
 	root *Node
 }
 
-func (self *Bmfs) Init() {
+func (bmfs *Bmfs) Init() {
 	defer trace()()
-//	e := syscall.Chdir(self.root)
+//	e := syscall.Chdir(bmfs.root)
 //	if nil == e {
-//		self.root = "./"
+//		bmfs.root = "./"
 //	}
 }
 
-func (self *Bmfs) resolvePath(path string) (resolvedPath string) {
+func (bmfs *Bmfs) resolvePath(path string) (resolvedPath string) {
 	cleanPath := filepath.Clean(path)
 	if filepath.IsAbs(cleanPath) {
 		if len(cleanPath) > 1 {
@@ -313,64 +312,64 @@ func (self *Bmfs) resolvePath(path string) (resolvedPath string) {
 			cleanPath = ""
 		}
 	}
-	resolvedPath = self.root.ResolvePath(cleanPath)
-	log.Printf("bindmapfuse resolvePath: path=%s resolvedPath=%s", path, resolvedPath)
+	resolvedPath = bmfs.root.ResolvePath(cleanPath)
+	bmfs.debugf("bindmapfuse resolvePath: path=%s resolvedPath=%s", path, resolvedPath)
 	return
 }
 
-func (self *Bmfs) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
+func (bmfs *Bmfs) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
 	defer trace(path)(&errc, stat)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	stgo := syscall.Statfs_t{}
 	errc = errno(syscall_Statfs(resolvedPath, &stgo))
 	copyFusestatfsFromGostatfs(stat, &stgo)
 	return
 }
 
-func (self *Bmfs) Mknod(path string, mode uint32, dev uint64) (errc int) {
+func (bmfs *Bmfs) Mknod(path string, mode uint32, dev uint64) (errc int) {
 	defer trace(path, mode, dev)(&errc)
 	defer setuidgid()()
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	return errno(syscall.Mknod(resolvedPath, mode, int(dev)))
 }
 
-func (self *Bmfs) Mkdir(path string, mode uint32) (errc int) {
+func (bmfs *Bmfs) Mkdir(path string, mode uint32) (errc int) {
 	defer trace(path, mode)(&errc)
 	defer setuidgid()()
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	return errno(syscall.Mkdir(resolvedPath, mode))
 }
 
-func (self *Bmfs) Unlink(path string) (errc int) {
+func (bmfs *Bmfs) Unlink(path string) (errc int) {
 	defer trace(path)(&errc)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	return errno(syscall.Unlink(resolvedPath))
 }
 
-func (self *Bmfs) Rmdir(path string) (errc int) {
+func (bmfs *Bmfs) Rmdir(path string) (errc int) {
 	defer trace(path)(&errc)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	return errno(syscall.Rmdir(resolvedPath))
 }
 
-func (self *Bmfs) Link(oldpath string, newpath string) (errc int) {
+func (bmfs *Bmfs) Link(oldpath string, newpath string) (errc int) {
 	defer trace(oldpath, newpath)(&errc)
 	defer setuidgid()()
-	oldResolvedPath := self.resolvePath(oldpath)
-	newResolvedPath := self.resolvePath(newpath)
+	oldResolvedPath := bmfs.resolvePath(oldpath)
+	newResolvedPath := bmfs.resolvePath(newpath)
 	return errno(syscall.Link(oldResolvedPath, newResolvedPath))
 }
 
-func (self *Bmfs) Symlink(target string, newpath string) (errc int) {
+func (bmfs *Bmfs) Symlink(target string, newpath string) (errc int) {
 	defer trace(target, newpath)(&errc)
 	defer setuidgid()()
-	newResolvedPath := self.resolvePath(newpath)
+	newResolvedPath := bmfs.resolvePath(newpath)
 	return errno(syscall.Symlink(target, newResolvedPath))
 }
 
-func (self *Bmfs) Readlink(path string) (errc int, target string) {
+func (bmfs *Bmfs) Readlink(path string) (errc int, target string) {
 	defer trace(path)(&errc, &target)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	buff := [1024]byte{}
 	n, e := syscall.Readlink(resolvedPath, buff[:])
 	if nil != e {
@@ -379,48 +378,48 @@ func (self *Bmfs) Readlink(path string) (errc int, target string) {
 	return 0, string(buff[:n])
 }
 
-func (self *Bmfs) Rename(oldpath string, newpath string) (errc int) {
+func (bmfs *Bmfs) Rename(oldpath string, newpath string) (errc int) {
 	defer trace(oldpath, newpath)(&errc)
 	defer setuidgid()()
-	oldResolvedPath := self.resolvePath(oldpath)
-	newResolvedPath := self.resolvePath(newpath)
+	oldResolvedPath := bmfs.resolvePath(oldpath)
+	newResolvedPath := bmfs.resolvePath(newpath)
 	return errno(syscall.Rename(oldResolvedPath, newResolvedPath))
 }
 
-func (self *Bmfs) Chmod(path string, mode uint32) (errc int) {
+func (bmfs *Bmfs) Chmod(path string, mode uint32) (errc int) {
 	defer trace(path, mode)(&errc)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	return errno(syscall.Chmod(resolvedPath, mode))
 }
 
-func (self *Bmfs) Chown(path string, uid uint32, gid uint32) (errc int) {
+func (bmfs *Bmfs) Chown(path string, uid uint32, gid uint32) (errc int) {
 	defer trace(path, uid, gid)(&errc)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	return errno(syscall.Lchown(resolvedPath, int(uid), int(gid)))
 }
 
-func (self *Bmfs) Utimens(path string, tmsp1 []fuse.Timespec) (errc int) {
+func (bmfs *Bmfs) Utimens(path string, tmsp1 []fuse.Timespec) (errc int) {
 	defer trace(path, tmsp1)(&errc)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	tmsp := [2]syscall.Timespec{}
 	tmsp[0].Sec, tmsp[0].Nsec = tmsp1[0].Sec, tmsp1[0].Nsec
 	tmsp[1].Sec, tmsp[1].Nsec = tmsp1[1].Sec, tmsp1[1].Nsec
 	return errno(syscall.UtimesNano(resolvedPath, tmsp[:]))
 }
 
-func (self *Bmfs) Create(path string, flags int, mode uint32) (errc int, fh uint64) {
+func (bmfs *Bmfs) Create(path string, flags int, mode uint32) (errc int, fh uint64) {
 	defer trace(path, flags, mode)(&errc, &fh)
 	defer setuidgid()()
-	return self.open(path, flags, mode)
+	return bmfs.open(path, flags, mode)
 }
 
-func (self *Bmfs) Open(path string, flags int) (errc int, fh uint64) {
+func (bmfs *Bmfs) Open(path string, flags int) (errc int, fh uint64) {
 	defer trace(path, flags)(&errc, &fh)
-	return self.open(path, flags, 0)
+	return bmfs.open(path, flags, 0)
 }
 
-func (self *Bmfs) open(path string, flags int, mode uint32) (errc int, fh uint64) {
-	resolvedPath := self.resolvePath(path)
+func (bmfs *Bmfs) open(path string, flags int, mode uint32) (errc int, fh uint64) {
+	resolvedPath := bmfs.resolvePath(path)
 	f, e := syscall.Open(resolvedPath, flags, mode)
 	if nil != e {
 		return errno(e), ^uint64(0)
@@ -428,17 +427,17 @@ func (self *Bmfs) open(path string, flags int, mode uint32) (errc int, fh uint64
 	return 0, uint64(f)
 }
 
-func (self *Bmfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
+func (bmfs *Bmfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 	defer trace(path, fh)(&errc, stat)
 	stgo := syscall.Stat_t{}
 	if ^uint64(0) == fh {
-		resolvedPath := self.resolvePath(path)
+		resolvedPath := bmfs.resolvePath(path)
 		errc = errno(syscall.Lstat(resolvedPath, &stgo))
 	} else {
 		errc = errno(syscall.Fstat(int(fh), &stgo))
 	}
 	if errc != 0 {
-		node := self.root.LookupPath(path)
+		node := bmfs.root.LookupPath(path)
 		if node != nil {
 			stgo.Mode = fuse.S_IFDIR | 0555
 			errc = 0
@@ -448,10 +447,10 @@ func (self *Bmfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) 
 	return
 }
 
-func (self *Bmfs) Truncate(path string, size int64, fh uint64) (errc int) {
+func (bmfs *Bmfs) Truncate(path string, size int64, fh uint64) (errc int) {
 	defer trace(path, size, fh)(&errc)
 	if ^uint64(0) == fh {
-		resolvedPath := self.resolvePath(path)
+		resolvedPath := bmfs.resolvePath(path)
 		errc = errno(syscall.Truncate(resolvedPath, size))
 	} else {
 		errc = errno(syscall.Ftruncate(int(fh), size))
@@ -459,7 +458,7 @@ func (self *Bmfs) Truncate(path string, size int64, fh uint64) (errc int) {
 	return
 }
 
-func (self *Bmfs) Read(path string, buff []byte, ofst int64, fh uint64) (n int) {
+func (bmfs *Bmfs) Read(path string, buff []byte, ofst int64, fh uint64) (n int) {
 	defer trace(path, buff, ofst, fh)(&n)
 	n, e := syscall.Pread(int(fh), buff, ofst)
 	if nil != e {
@@ -468,7 +467,7 @@ func (self *Bmfs) Read(path string, buff []byte, ofst int64, fh uint64) (n int) 
 	return n
 }
 
-func (self *Bmfs) Write(path string, buff []byte, ofst int64, fh uint64) (n int) {
+func (bmfs *Bmfs) Write(path string, buff []byte, ofst int64, fh uint64) (n int) {
 	defer trace(path, buff, ofst, fh)(&n)
 	n, e := syscall.Pwrite(int(fh), buff, ofst)
 	if nil != e {
@@ -477,22 +476,22 @@ func (self *Bmfs) Write(path string, buff []byte, ofst int64, fh uint64) (n int)
 	return n
 }
 
-func (self *Bmfs) Release(path string, fh uint64) (errc int) {
+func (bmfs *Bmfs) Release(path string, fh uint64) (errc int) {
 	defer trace(path, fh)(&errc)
 	return errno(syscall.Close(int(fh)))
 }
 
-func (self *Bmfs) Fsync(path string, datasync bool, fh uint64) (errc int) {
+func (bmfs *Bmfs) Fsync(path string, datasync bool, fh uint64) (errc int) {
 	defer trace(path, datasync, fh)(&errc)
 	return errno(syscall.Fsync(int(fh)))
 }
 
-func (self *Bmfs) Opendir(path string) (errc int, fh uint64) {
+func (bmfs *Bmfs) Opendir(path string) (errc int, fh uint64) {
 	defer trace(path)(&errc, &fh)
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	f, e := syscall.Open(resolvedPath, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if e != nil {
-		node := self.root.LookupPath(path)
+		node := bmfs.root.LookupPath(path)
 		if node != nil {
 			e = nil
 		}
@@ -503,22 +502,20 @@ func (self *Bmfs) Opendir(path string) (errc int, fh uint64) {
 	return 0, uint64(f)
 }
 
-func (self *Bmfs) Readdir(path string,
+func (bmfs *Bmfs) Readdir(path string,
 	fill func(name string, stat *fuse.Stat_t, ofst int64) bool,
 	ofst int64,
 	fh uint64) (errc int) {
 	defer trace(path, fill, ofst, fh)(&errc)
-	node := self.root.LookupPath(path)
-	log.Printf("Readdir have node=%+v for path=%s", node, path)
+	node := bmfs.root.LookupPath(path)
 	if node != nil {
 		for _, name := range node.ListMountNames() {
-			log.Printf("Readdir adding mount name %s at path %s", name, path)
 			if !fill(name, nil, 0) {
 				break
 			}
 		}
 	}
-	resolvedPath := self.resolvePath(path)
+	resolvedPath := bmfs.resolvePath(path)
 	file, e := os.Open(resolvedPath)
 	if nil != e {
 		if node != nil {
@@ -543,18 +540,25 @@ func (self *Bmfs) Readdir(path string,
 	return 0
 }
 
-func (self *Bmfs) Releasedir(path string, fh uint64) (errc int) {
+func (bmfs *Bmfs) Releasedir(path string, fh uint64) (errc int) {
 	defer trace(path, fh)(&errc)
 	return errno(syscall.Close(int(fh)))
 }
 
+func (bmfs *Bmfs) debugf(format string, v ...interface{}) {
+	if bmfs.config.Debug {
+		log.Printf(format, v...)
+	}
+}
+
 type BindMapConfig struct {
 	Mounts map[string]string `json:"mounts"`
+	Debug bool
 }
 
 func main() {
 	syscall.Umask(0)
-	bmfs := Bmfs{}
+	bmfs := &Bmfs{}
 	var configFileSet bool
 	var configFilePath string
 	var bindMapConfig BindMapConfig
@@ -571,14 +575,15 @@ func main() {
 		if err != nil {
 			log.Fatalf("bindmapfuse: error parsing bind map config file contents as YAML/JSON: %v", err)
 		}
-		log.Printf("bindmapfuse: have bindMapConfig=%+v", bindMapConfig)
+		bmfs.config = &bindMapConfig
+		bmfs.debugf("bindmapfuse: have bindMapConfig=%+v", bindMapConfig)
 	}
 	bmfs.root = NewNode("/", "", nil)
 	for mountPath, realPath := range bindMapConfig.Mounts {
 		mountPath = filepath.Clean(mountPath)
 		bmfs.root.EnsureDescendentNode(mountPath, realPath)
 	}
-	_host = fuse.NewFileSystemHost(&bmfs)
+	_host = fuse.NewFileSystemHost(bmfs)
 	_host.Mount("", args[1:])
 }
 
