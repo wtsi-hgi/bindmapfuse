@@ -213,11 +213,19 @@ func (n *Node) GetMount(name string) *Node {
 	return n.mounts[name]
 }
 
+func (n *Node) ListMountNames() (names []string) {
+	names = make([]string, len(n.mounts))
+	i := 0
+	for mount := range n.mounts {
+		names[i] = mount
+		i++
+	}
+	return
+}
+
 func (n *Node) EnsureDescendentNode(mountPath string, realPath string) {
-	mountPathSegments := strings.SplitN(filepath.ToSlash(mountPath), "/", 2)
-	childName := mountPathSegments[0]
-	if len(mountPathSegments) > 1 {
-		relPath := filepath.Join(mountPathSegments[1:]...)
+	childName, relPath := n.splitPathFirstRest(mountPath)
+	if relPath != "" {
 		if !n.HasMount(childName) {
 			n.AddMount(NewNode(childName, "", n))
 		}
@@ -243,13 +251,39 @@ func (n *Node) RealPath() (realPath string) {
 	}
 }
 
-func (n *Node) ResolvePath(path string) (realPath string) {
-	pathSegments := strings.SplitN(filepath.ToSlash(path), "/", 2)
-	childName := pathSegments[0]
-	relPath := ""
-	if len(pathSegments) > 1 {
-		relPath = filepath.Join(pathSegments[1:]...)
+func (n *Node) LookupPath(path string) *Node {
+	if path == "/" && n.IsRoot() {
+		log.Printf("LookupPath: returning root node")
+		return n
 	}
+	childName, relPath := n.splitPathFirstRest(path)
+	if n.HasMount(childName) {
+		if relPath == "" {
+			return n.GetMount(childName)
+		} else {
+			return n.GetMount(childName).LookupPath(relPath)
+		}
+	} else {
+		log.Printf("LookupPath: node=%+v has no child named '%s' for path='%s'", n, childName, path)
+		return nil
+	}
+}
+
+func (n *Node) splitPathFirstRest(path string) (first string, rest string) {
+	if filepath.IsAbs(path) {
+		path = path[1:]
+	}
+	pathSegments := strings.SplitN(filepath.ToSlash(path), "/", 2)
+	first = pathSegments[0]
+	rest = ""
+	if len(pathSegments) > 1 {
+		rest = filepath.Join(pathSegments[1:]...)
+	}
+	return
+}
+
+func (n *Node) ResolvePath(path string) (realPath string) {
+	childName, relPath := n.splitPathFirstRest(path)
 	if n.HasMount(childName) {
 		return n.GetMount(childName).ResolvePath(relPath)
 	} else {
@@ -286,9 +320,9 @@ func (self *Bmfs) resolvePath(path string) (resolvedPath string) {
 
 func (self *Bmfs) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
 	defer trace(path)(&errc, stat)
-	path = self.resolvePath(path)
+	resolvedPath := self.resolvePath(path)
 	stgo := syscall.Statfs_t{}
-	errc = errno(syscall_Statfs(path, &stgo))
+	errc = errno(syscall_Statfs(resolvedPath, &stgo))
 	copyFusestatfsFromGostatfs(stat, &stgo)
 	return
 }
@@ -296,49 +330,49 @@ func (self *Bmfs) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
 func (self *Bmfs) Mknod(path string, mode uint32, dev uint64) (errc int) {
 	defer trace(path, mode, dev)(&errc)
 	defer setuidgid()()
-	path = self.resolvePath(path)
-	return errno(syscall.Mknod(path, mode, int(dev)))
+	resolvedPath := self.resolvePath(path)
+	return errno(syscall.Mknod(resolvedPath, mode, int(dev)))
 }
 
 func (self *Bmfs) Mkdir(path string, mode uint32) (errc int) {
 	defer trace(path, mode)(&errc)
 	defer setuidgid()()
-	path = self.resolvePath(path)
-	return errno(syscall.Mkdir(path, mode))
+	resolvedPath := self.resolvePath(path)
+	return errno(syscall.Mkdir(resolvedPath, mode))
 }
 
 func (self *Bmfs) Unlink(path string) (errc int) {
 	defer trace(path)(&errc)
-	path = self.resolvePath(path)
-	return errno(syscall.Unlink(path))
+	resolvedPath := self.resolvePath(path)
+	return errno(syscall.Unlink(resolvedPath))
 }
 
 func (self *Bmfs) Rmdir(path string) (errc int) {
 	defer trace(path)(&errc)
-	path = self.resolvePath(path)
-	return errno(syscall.Rmdir(path))
+	resolvedPath := self.resolvePath(path)
+	return errno(syscall.Rmdir(resolvedPath))
 }
 
 func (self *Bmfs) Link(oldpath string, newpath string) (errc int) {
 	defer trace(oldpath, newpath)(&errc)
 	defer setuidgid()()
-	oldpath = self.resolvePath(oldpath)
-	newpath = self.resolvePath(newpath)
-	return errno(syscall.Link(oldpath, newpath))
+	oldResolvedPath := self.resolvePath(oldpath)
+	newResolvedPath := self.resolvePath(newpath)
+	return errno(syscall.Link(oldResolvedPath, newResolvedPath))
 }
 
 func (self *Bmfs) Symlink(target string, newpath string) (errc int) {
 	defer trace(target, newpath)(&errc)
 	defer setuidgid()()
-	newpath = self.resolvePath(newpath)
-	return errno(syscall.Symlink(target, newpath))
+	newResolvedPath := self.resolvePath(newpath)
+	return errno(syscall.Symlink(target, newResolvedPath))
 }
 
 func (self *Bmfs) Readlink(path string) (errc int, target string) {
 	defer trace(path)(&errc, &target)
-	path = self.resolvePath(path)
+	resolvedPath := self.resolvePath(path)
 	buff := [1024]byte{}
-	n, e := syscall.Readlink(path, buff[:])
+	n, e := syscall.Readlink(resolvedPath, buff[:])
 	if nil != e {
 		return errno(e), ""
 	}
@@ -348,30 +382,30 @@ func (self *Bmfs) Readlink(path string) (errc int, target string) {
 func (self *Bmfs) Rename(oldpath string, newpath string) (errc int) {
 	defer trace(oldpath, newpath)(&errc)
 	defer setuidgid()()
-	oldpath = self.resolvePath(oldpath)
-	newpath = self.resolvePath(newpath)
-	return errno(syscall.Rename(oldpath, newpath))
+	oldResolvedPath := self.resolvePath(oldpath)
+	newResolvedPath := self.resolvePath(newpath)
+	return errno(syscall.Rename(oldResolvedPath, newResolvedPath))
 }
 
 func (self *Bmfs) Chmod(path string, mode uint32) (errc int) {
 	defer trace(path, mode)(&errc)
-	path = self.resolvePath(path)
-	return errno(syscall.Chmod(path, mode))
+	resolvedPath := self.resolvePath(path)
+	return errno(syscall.Chmod(resolvedPath, mode))
 }
 
 func (self *Bmfs) Chown(path string, uid uint32, gid uint32) (errc int) {
 	defer trace(path, uid, gid)(&errc)
-	path = self.resolvePath(path)
-	return errno(syscall.Lchown(path, int(uid), int(gid)))
+	resolvedPath := self.resolvePath(path)
+	return errno(syscall.Lchown(resolvedPath, int(uid), int(gid)))
 }
 
 func (self *Bmfs) Utimens(path string, tmsp1 []fuse.Timespec) (errc int) {
 	defer trace(path, tmsp1)(&errc)
-	path = self.resolvePath(path)
+	resolvedPath := self.resolvePath(path)
 	tmsp := [2]syscall.Timespec{}
 	tmsp[0].Sec, tmsp[0].Nsec = tmsp1[0].Sec, tmsp1[0].Nsec
 	tmsp[1].Sec, tmsp[1].Nsec = tmsp1[1].Sec, tmsp1[1].Nsec
-	return errno(syscall.UtimesNano(path, tmsp[:]))
+	return errno(syscall.UtimesNano(resolvedPath, tmsp[:]))
 }
 
 func (self *Bmfs) Create(path string, flags int, mode uint32) (errc int, fh uint64) {
@@ -386,8 +420,8 @@ func (self *Bmfs) Open(path string, flags int) (errc int, fh uint64) {
 }
 
 func (self *Bmfs) open(path string, flags int, mode uint32) (errc int, fh uint64) {
-	path = self.resolvePath(path)
-	f, e := syscall.Open(path, flags, mode)
+	resolvedPath := self.resolvePath(path)
+	f, e := syscall.Open(resolvedPath, flags, mode)
 	if nil != e {
 		return errno(e), ^uint64(0)
 	}
@@ -398,10 +432,17 @@ func (self *Bmfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) 
 	defer trace(path, fh)(&errc, stat)
 	stgo := syscall.Stat_t{}
 	if ^uint64(0) == fh {
-		path = self.resolvePath(path)
-		errc = errno(syscall.Lstat(path, &stgo))
+		resolvedPath := self.resolvePath(path)
+		errc = errno(syscall.Lstat(resolvedPath, &stgo))
 	} else {
 		errc = errno(syscall.Fstat(int(fh), &stgo))
+	}
+	if errc != 0 {
+		node := self.root.LookupPath(path)
+		if node != nil {
+			stgo.Mode = fuse.S_IFDIR | 0555
+			errc = 0
+		}
 	}
 	copyFusestatFromGostat(stat, &stgo)
 	return
@@ -410,8 +451,8 @@ func (self *Bmfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) 
 func (self *Bmfs) Truncate(path string, size int64, fh uint64) (errc int) {
 	defer trace(path, size, fh)(&errc)
 	if ^uint64(0) == fh {
-		path = self.resolvePath(path)
-		errc = errno(syscall.Truncate(path, size))
+		resolvedPath := self.resolvePath(path)
+		errc = errno(syscall.Truncate(resolvedPath, size))
 	} else {
 		errc = errno(syscall.Ftruncate(int(fh), size))
 	}
@@ -448,9 +489,15 @@ func (self *Bmfs) Fsync(path string, datasync bool, fh uint64) (errc int) {
 
 func (self *Bmfs) Opendir(path string) (errc int, fh uint64) {
 	defer trace(path)(&errc, &fh)
-	path = self.resolvePath(path)
-	f, e := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-	if nil != e {
+	resolvedPath := self.resolvePath(path)
+	f, e := syscall.Open(resolvedPath, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if e != nil {
+		node := self.root.LookupPath(path)
+		if node != nil {
+			e = nil
+		}
+	}
+	if e != nil {
 		return errno(e), ^uint64(0)
 	}
 	return 0, uint64(f)
@@ -461,14 +508,30 @@ func (self *Bmfs) Readdir(path string,
 	ofst int64,
 	fh uint64) (errc int) {
 	defer trace(path, fill, ofst, fh)(&errc)
-	path = self.resolvePath(path)
-	file, e := os.Open(path)
+	node := self.root.LookupPath(path)
+	log.Printf("Readdir have node=%+v for path=%s", node, path)
+	if node != nil {
+		for _, name := range node.ListMountNames() {
+			log.Printf("Readdir adding mount name %s at path %s", name, path)
+			if !fill(name, nil, 0) {
+				break
+			}
+		}
+	}
+	resolvedPath := self.resolvePath(path)
+	file, e := os.Open(resolvedPath)
 	if nil != e {
+		if node != nil {
+			return 0
+		}
 		return errno(e)
 	}
 	defer file.Close()
 	nams, e := file.Readdirnames(0)
-	if nil != e {
+	if e != nil {
+		if node != nil {
+			return 0
+		}
 		return errno(e)
 	}
 	nams = append([]string{".", ".."}, nams...)
