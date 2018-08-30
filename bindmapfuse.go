@@ -239,6 +239,10 @@ func (n *Node) IsRoot() bool {
 	return n.parent == nil
 }
 
+func (n *Node) IsVirtual() bool {
+	return n.realPath == ""
+}
+
 func (n *Node) RealPath() (realPath string) {
 	if n.realPath != "" {
 		return n.realPath
@@ -291,16 +295,17 @@ func (n *Node) ResolvePath(path string) (realPath string) {
 
 type Bmfs struct {
 	fuse.FileSystemBase
-	config *BindMapConfig
+	initReady chan bool
 	root *Node
+	debug bool
 }
 
 func (bmfs *Bmfs) Init() {
 	defer trace()()
-//	e := syscall.Chdir(bmfs.root)
-//	if nil == e {
-//		bmfs.root = "./"
-//	}
+	ready := <-bmfs.initReady
+	if !ready {
+		log.Fatalf("bindmapfuse: initialization failed")
+	}
 }
 
 func (bmfs *Bmfs) resolvePath(path string) (resolvedPath string) {
@@ -430,17 +435,16 @@ func (bmfs *Bmfs) open(path string, flags int, mode uint32) (errc int, fh uint64
 func (bmfs *Bmfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 	defer trace(path, fh)(&errc, stat)
 	stgo := syscall.Stat_t{}
-	if ^uint64(0) == fh {
-		resolvedPath := bmfs.resolvePath(path)
-		errc = errno(syscall.Lstat(resolvedPath, &stgo))
+	node := bmfs.root.LookupPath(path)
+	if node != nil && node.IsVirtual() {
+		stgo.Mode = fuse.S_IFDIR | 0555
+		errc = 0
 	} else {
-		errc = errno(syscall.Fstat(int(fh), &stgo))
-	}
-	if errc != 0 {
-		node := bmfs.root.LookupPath(path)
-		if node != nil {
-			stgo.Mode = fuse.S_IFDIR | 0555
-			errc = 0
+		if ^uint64(0) == fh {
+			resolvedPath := bmfs.resolvePath(path)
+			errc = errno(syscall.Lstat(resolvedPath, &stgo))
+		} else {
+			errc = errno(syscall.Fstat(int(fh), &stgo))
 		}
 	}
 	copyFusestatFromGostat(stat, &stgo)
@@ -488,14 +492,12 @@ func (bmfs *Bmfs) Fsync(path string, datasync bool, fh uint64) (errc int) {
 
 func (bmfs *Bmfs) Opendir(path string) (errc int, fh uint64) {
 	defer trace(path)(&errc, &fh)
+	node := bmfs.root.LookupPath(path)
+	if node != nil && node.IsVirtual() {
+		return 0, ^uint64(0)
+	}
 	resolvedPath := bmfs.resolvePath(path)
 	f, e := syscall.Open(resolvedPath, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-	if e != nil {
-		node := bmfs.root.LookupPath(path)
-		if node != nil {
-			e = nil
-		}
-	}
 	if e != nil {
 		return errno(e), ^uint64(0)
 	}
@@ -524,15 +526,20 @@ func (bmfs *Bmfs) Readdir(path string,
 		return errno(e)
 	}
 	defer file.Close()
-	nams, e := file.Readdirnames(0)
+	names, e := file.Readdirnames(0)
 	if e != nil {
 		if node != nil {
 			return 0
 		}
 		return errno(e)
 	}
-	nams = append([]string{".", ".."}, nams...)
-	for _, name := range nams {
+	names = append([]string{".", ".."}, names...)
+	for _, name := range names {
+		if node != nil {
+			if node.HasMount(name) {
+				continue
+			}
+		}
 		if !fill(name, nil, 0) {
 			break
 		}
@@ -546,7 +553,7 @@ func (bmfs *Bmfs) Releasedir(path string, fh uint64) (errc int) {
 }
 
 func (bmfs *Bmfs) debugf(format string, v ...interface{}) {
-	if bmfs.config.Debug {
+	if bmfs.debug {
 		log.Printf(format, v...)
 	}
 }
@@ -561,28 +568,34 @@ func main() {
 	bmfs := &Bmfs{}
 	var configFileSet bool
 	var configFilePath string
-	var bindMapConfig BindMapConfig
 	args, err := fuse.OptParse(os.Args, "bind_map_config= bind_map_config", &configFileSet, &configFilePath)
 	if err != nil {
 		log.Fatalf("bindmapfuse: error parsing command-line options: %v", err)
 	}
-	if configFileSet {
-		configFileBytes, err := ioutil.ReadFile(configFilePath)
-		if err != nil {
-			log.Fatalf("bindmapfuse: error reading bind map config file %s: %v", configFilePath, err)
-		}
-		err = yaml.Unmarshal(configFileBytes, &bindMapConfig)
-		if err != nil {
-			log.Fatalf("bindmapfuse: error parsing bind map config file contents as YAML/JSON: %v", err)
-		}
-		bmfs.config = &bindMapConfig
-		bmfs.debugf("bindmapfuse: have bindMapConfig=%+v", bindMapConfig)
-	}
 	bmfs.root = NewNode("/", "", nil)
-	for mountPath, realPath := range bindMapConfig.Mounts {
-		mountPath = filepath.Clean(mountPath)
-		bmfs.root.EnsureDescendentNode(mountPath, realPath)
-	}
+
+	go func() {
+		bmfs.initReady = make(chan bool)
+		var bindMapConfig BindMapConfig
+		if configFileSet {
+			configFileBytes, err := ioutil.ReadFile(configFilePath)
+			if err != nil {
+				log.Fatalf("bindmapfuse: error reading bind map config file %s: %v", configFilePath, err)
+			}
+			err = yaml.Unmarshal(configFileBytes, &bindMapConfig)
+			if err != nil {
+				log.Fatalf("bindmapfuse: error parsing bind map config file contents as YAML/JSON: %v", err)
+			}
+			bmfs.debug = bindMapConfig.Debug
+			bmfs.debugf("bindmapfuse: have bindMapConfig=%+v", bindMapConfig)
+		}
+		for mountPath, realPath := range bindMapConfig.Mounts {
+			mountPath = filepath.Clean(mountPath)
+			bmfs.root.EnsureDescendentNode(mountPath, realPath)
+		}
+		bmfs.initReady <- true
+	}()
+	
 	_host = fuse.NewFileSystemHost(bmfs)
 	_host.Mount("", args[1:])
 }
