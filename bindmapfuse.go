@@ -176,60 +176,112 @@ var (
 )
 
 type Node struct {
+	name string
+	path string
 	realPath string
+	parent *Node
+	mounts map[string]*Node
+}
+
+func NewNode(name string, realPath string, parent *Node) (n *Node) {
+	n = &Node{}
+	n.name = name
+	n.parent = parent
+	if n.parent != nil {
+		n.path = filepath.Join(parent.path, name)
+	}
+	n.realPath = realPath
+	n.mounts = make(map[string]*Node)
+	return
+}
+
+func (n *Node) AddMount(c *Node) {
+	_, exists := n.mounts[c.name]
+	if !exists {
+		n.mounts[c.name] = c
+	} else {
+		log.Fatalf("bindmapfuse: attempted to add mount over existing mount %s at %s", c.name, n.path)
+	}
+}
+
+func (n *Node) HasMount(name string) bool {
+	_, exists := n.mounts[name]
+	return exists
+}
+
+func (n *Node) GetMount(name string) *Node {
+	return n.mounts[name]
+}
+
+func (n *Node) EnsureDescendentNode(mountPath string, realPath string) {
+	mountPathSegments := strings.SplitN(filepath.ToSlash(mountPath), "/", 2)
+	childName := mountPathSegments[0]
+	if len(mountPathSegments) > 1 {
+		relPath := filepath.Join(mountPathSegments[1:]...)
+		if !n.HasMount(childName) {
+			n.AddMount(NewNode(childName, "", n))
+		}
+		n.GetMount(childName).EnsureDescendentNode(relPath, realPath)
+	} else {
+		n.AddMount(NewNode(childName, realPath, n))
+	}
+}
+
+func (n *Node) IsRoot() bool {
+	return n.parent == nil
+}
+
+func (n *Node) RealPath() (realPath string) {
+	if n.realPath != "" {
+		return n.realPath
+	} else {
+		if n.IsRoot() {
+			return ""
+		} else {
+			return filepath.Join(n.parent.RealPath(), n.name)
+		}
+	}
+}
+
+func (n *Node) ResolvePath(path string) (realPath string) {
+	pathSegments := strings.SplitN(filepath.ToSlash(path), "/", 2)
+	childName := pathSegments[0]
+	relPath := ""
+	if len(pathSegments) > 1 {
+		relPath = filepath.Join(pathSegments[1:]...)
+	}
+	if n.HasMount(childName) {
+		return n.GetMount(childName).ResolvePath(relPath)
+	} else {
+		return filepath.Join(n.RealPath(), childName, relPath)
+	}
 }
 
 type Bmfs struct {
 	fuse.FileSystemBase
-	root string
-	mounts map[string]*Node
+	root *Node
 }
 
 func (self *Bmfs) Init() {
 	defer trace()()
-	e := syscall.Chdir(self.root)
-	if nil == e {
-		self.root = "./"
-	}
+//	e := syscall.Chdir(self.root)
+//	if nil == e {
+//		self.root = "./"
+//	}
 }
 
-func (self *Bmfs) resolvePath(path string) string {
-	mount := filepath.Clean(path)
-	afterMount := ""
-	if filepath.IsAbs(mount) {
-		if len(mount) > 1 {
-			mount = mount[1:]
+func (self *Bmfs) resolvePath(path string) (resolvedPath string) {
+	cleanPath := filepath.Clean(path)
+	if filepath.IsAbs(cleanPath) {
+		if len(cleanPath) > 1 {
+			cleanPath = cleanPath[1:]
 		} else {
-			mount = ""
+			cleanPath = ""
 		}
 	}
-	mappedMount := ""
-	for mount != "" {
-		log.Printf("resolvePath: path=%s mount=%s afterMount=%s", path, mount, afterMount)
-		node, ok := self.mounts[mount]
-		if ok {
-			log.Printf("resolvePath: mapped mount=%s to node=%+v", mount, node)
-			mappedMount = filepath.Join(node.realPath, afterMount)
-			break
-		}
-		var file string
-		mount, file = filepath.Split(mount)
-		if mount[len(mount)-1:] == "/" {
-			mount = mount[:len(mount)-1]
-		}		
-		if file == "" {
-			log.Printf("resolvePath: failed to map path=%s mounts=%v", path, self.mounts)
-			mappedMount = filepath.Join(mount, afterMount)
-			break
-		} else {
-			afterMount = filepath.Join(file, afterMount)
-		}
-	}
-	if !filepath.IsAbs(mappedMount) {
-		mappedMount = filepath.Join(self.root, mappedMount)
-	}
-	log.Printf("resolvePath: path=%s mappedMount=%s", path, mappedMount)
-	return mappedMount
+	resolvedPath = self.root.ResolvePath(cleanPath)
+	log.Printf("bindmapfuse resolvePath: path=%s resolvedPath=%s", path, resolvedPath)
+	return
 }
 
 func (self *Bmfs) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
@@ -434,7 +486,6 @@ func (self *Bmfs) Releasedir(path string, fh uint64) (errc int) {
 }
 
 type BindMapConfig struct {
-	Root string `json:"root"`
 	Mounts map[string]string `json:"mounts"`
 }
 
@@ -459,22 +510,10 @@ func main() {
 		}
 		log.Printf("bindmapfuse: have bindMapConfig=%+v", bindMapConfig)
 	}
-	bmfs.mounts = make(map[string]*Node)
-	for m, p := range bindMapConfig.Mounts {
-		m = filepath.Clean(m)
-		bmfs.mounts[m] = &Node{realPath: p}
-		for _, c := range strings.Split(filepath.ToSlash(m), "/") {
-			_, ok := bmfs.mounts[c]
-			if !ok {
-				bmfs.mounts[c] = &Node{}
-			}
-		}
-	}
-	if bindMapConfig.Root != "" {
-		bmfs.root, err = filepath.Abs(bindMapConfig.Root)
-		if err != nil {
-			log.Fatalf("bindmapfuse: error setting root path to %s: %v", bindMapConfig.Root, err)
-		}
+	bmfs.root = NewNode("/", "", nil)
+	for mountPath, realPath := range bindMapConfig.Mounts {
+		mountPath = filepath.Clean(mountPath)
+		bmfs.root.EnsureDescendentNode(mountPath, realPath)
 	}
 	_host = fuse.NewFileSystemHost(&bmfs)
 	_host.Mount("", args[1:])
