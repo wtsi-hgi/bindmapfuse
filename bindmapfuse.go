@@ -231,7 +231,16 @@ func (n *Node) EnsureDescendentNode(mountPath string, realPath string) {
 		}
 		n.GetMount(childName).EnsureDescendentNode(relPath, realPath)
 	} else {
-		n.AddMount(NewNode(childName, realPath, n))
+		if !n.HasMount(childName) {
+			n.AddMount(NewNode(childName, realPath, n))
+		} else {
+			child := n.GetMount(childName)
+			oldRealPath := child.RealPath()
+			if oldRealPath != "" {
+				log.Printf("bindmapfuse: overriding real path '%s' with '%s'", oldRealPath, realPath)
+			}
+			child.SetRealPath(realPath)
+		}
 	}
 }
 
@@ -241,6 +250,10 @@ func (n *Node) IsRoot() bool {
 
 func (n *Node) IsVirtual() bool {
 	return n.realPath == ""
+}
+
+func (n *Node) SetRealPath(realPath string) {
+	n.realPath = realPath
 }
 
 func (n *Node) RealPath() (realPath string) {
