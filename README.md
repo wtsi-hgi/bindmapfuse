@@ -1,7 +1,7 @@
 bindmapfuse
 ===========
 
-bindmapfuse is a FUSE filesystem that exposes an underlying filesystem according to a potentially very large set of bind mounts. It was developed to solve a problem wherein a very large number (hundreds of thousands) of bind mounts were desired in a docker container, but the docker daemon did not support this because the container configuration was too large.
+bindmapfuse is a FUSE filesystem that exposes an underlying filesystem according to a potentially very large set of bind mounts. It was developed to solve a problem in which a very large number (hundreds of thousands to millions) of bind mounts were desired in a docker container, but the docker daemon does not support this because the container configuration became too large.
 
 Example Usage
 -------------
