@@ -1,0 +1,5 @@
+mounts:
+  file1.txt: "/tmp/foo/bar/foobarfile.txt"
+  dir1: "/tmp/baz"
+  file2.txt: "/tmp/qux/quxfile.txt"
+  "dir1/qux": "/tmp/qux"
