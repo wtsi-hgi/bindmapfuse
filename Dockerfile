@@ -6,8 +6,10 @@ RUN \
   apt-get -qqy update && \
   apt-get -qqy install --no-install-recommends \
     bash \
+    build-essential \
     ca-certificates \
     curl \
+    gcc \
     git \
     libfuse-dev && \
   rm -rf /var/lib/apt/lists/* && \
@@ -18,3 +20,13 @@ RUN \
   tar -C /usr/local -xzf golang.tar.gz && \
   cd && \
   rm -rf "${TMPDIR}"
+
+ENV GOPATH=/go
+ENV PATH=${GOPATH}/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN mkdir -p ${GOPATH}/src/github.com/wtsi-hgi/bindmapfuse
+ADD *.go ${GOPATH}/src/github.com/wtsi-hgi/bindmapfuse/
+WORKDIR ${GOPATH}/src/github.com/wtsi-hgi/bindmapfuse
+RUN \
+  go get && \
+  go build && \
+  go install
