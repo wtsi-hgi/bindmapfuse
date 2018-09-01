@@ -448,16 +448,21 @@ func (bmfs *Bmfs) open(path string, flags int, mode uint32) (errc int, fh uint64
 func (bmfs *Bmfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 	defer trace(path, fh)(&errc, stat)
 	stgo := syscall.Stat_t{}
-	node := bmfs.root.LookupPath(path)
-	if node != nil && node.IsVirtual() {
-		stgo.Mode = fuse.S_IFDIR | 0555
-		errc = 0
+	if ^uint64(0) == fh {
+		resolvedPath := bmfs.resolvePath(path)
+		errc = errno(syscall.Lstat(resolvedPath, &stgo))
 	} else {
-		if ^uint64(0) == fh {
-			resolvedPath := bmfs.resolvePath(path)
-			errc = errno(syscall.Lstat(resolvedPath, &stgo))
-		} else {
-			errc = errno(syscall.Fstat(int(fh), &stgo))
+		errc = errno(syscall.Fstat(int(fh), &stgo))
+	}
+	if errc != 0 {
+		node := bmfs.root.LookupPath(path)
+		if node != nil && node.IsVirtual() {
+			stgo.Mode = fuse.S_IFDIR | 0755
+			stgo.Size = 4096
+			stgo.Nlink = 2
+			stgo.Uid = uint32(os.Getuid())
+			stgo.Gid = uint32(os.Getgid())
+			errc = 0
 		}
 	}
 	copyFusestatFromGostat(stat, &stgo)
@@ -505,13 +510,13 @@ func (bmfs *Bmfs) Fsync(path string, datasync bool, fh uint64) (errc int) {
 
 func (bmfs *Bmfs) Opendir(path string) (errc int, fh uint64) {
 	defer trace(path)(&errc, &fh)
-	node := bmfs.root.LookupPath(path)
-	if node != nil && node.IsVirtual() {
-		return 0, ^uint64(0)
-	}
 	resolvedPath := bmfs.resolvePath(path)
 	f, e := syscall.Open(resolvedPath, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if e != nil {
+		node := bmfs.root.LookupPath(path)
+		if node != nil && node.IsVirtual() {
+			return 0, ^uint64(0)
+		}
 		return errno(e), ^uint64(0)
 	}
 	return 0, uint64(f)
@@ -581,7 +586,7 @@ func main() {
 	bmfs := &Bmfs{}
 	var configFileSet bool
 	var configFilePath string
-	args, err := fuse.OptParse(os.Args, "bind_map_config= bind_map_config", &configFileSet, &configFilePath)
+	args, err := fuse.OptParse(os.Args[1:], "bind_map_config= bind_map_config", &configFileSet, &configFilePath)
 	if err != nil {
 		log.Fatalf("bindmapfuse: error parsing command-line options: %v", err)
 	}
@@ -604,13 +609,16 @@ func main() {
 		}
 		for mountPath, realPath := range bindMapConfig.Mounts {
 			mountPath = filepath.Clean(mountPath)
+			if filepath.IsAbs(mountPath) {
+				mountPath = mountPath[1:]
+			}
 			bmfs.root.EnsureDescendentNode(mountPath, realPath)
 		}
 		bmfs.initReady <- true
 	}()
 	
 	_host = fuse.NewFileSystemHost(bmfs)
-	_host.Mount("", args[1:])
+	_host.Mount("", args)
 }
 
 func setuidgid() func() {
